@@ -1,0 +1,89 @@
+name: Fetch OKX Data
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create data directory
+        run: mkdir -p data
+
+      - name: Fetch OKX Data
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+          OKX_API_KEY: *** secrets.OKX_API_KEY }}
+          OKX_SECRET_KEY: *** secrets.OKX_SECRET_KEY }}
+          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+        run: |
+          python3 << 'PYEOF'
+          import hmac, hashlib, base64, json, datetime, urllib.request, urllib.error, os
+
+          WORKER_URL = os.environ["CF_WORKER_URL"]
+          API_KEY = ***"OKX_API_KEY"]
+          SECRET_KEY = ***"OKX_SECRET_KEY"]
+          PASSPHRASE = os.environ["OKX_PASSPHRASE"]
+
+          def signed_request(method, path, body=None):
+              body_str = json.dumps(body) if body else ''
+              now = datetime.datetime.utcnow()
+              ts = now.strftime('%Y-%m-%dT%H:%M:%S.') + f"{now.microsecond // 1000:03d}Z"
+              message = ts + method + path + body_str
+              sign = base64.b64encode(hmac.new(SECRET_KEY.encode(), message.encode(), hashlib.sha256).digest()).decode()
+              url = f"{WORKER_URL}{path}"
+              req = urllib.request.Request(url, method=method)
+              req.add_header('OK-ACCESS-KEY', API_KEY)
+              req.add_header('OK-ACCESS-SIGN', sign)
+              req.add_header('OK-ACCESS-TIMESTAMP', ts)
+              req.add_header('OK-ACCESS-PASSPHRASE', PASSPHRASE)
+              req.add_header('Content-Type', 'application/json')
+              if body:
+                  req.data = body_str.encode()
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      return json.loads(resp.read().decode())
+              except Exception as e:
+                  return {'code': '-1', 'msg': str(e)}
+
+          def public_request(path):
+              url = f"{WORKER_URL}{path}"
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as resp:
+                      return json.loads(resp.read().decode())
+              except Exception as e:
+                  return {'code': '-1', 'msg': str(e)}
+
+          data = {
+              'timestamp': datetime.datetime.utcnow().isoformat(),
+              'server_time': public_request('/api/v5/public/time'),
+              'btc_ticker': public_request('/api/v5/market/ticker?instId=BTC-USDT'),
+              'eth_ticker': public_request('/api/v5/market/ticker?instId=ETH-USDT'),
+              'sol_ticker': public_request('/api/v5/market/ticker?instId=SOL-USDT'),
+              'balance': signed_request('GET', '/api/v5/account/balance'),
+              'positions': signed_request('GET', '/api/v5/account/positions'),
+          }
+
+          with open('data/latest.json', 'w') as f:
+              json.dump(data, f, indent=2, ensure_ascii=False)
+
+          ts = datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+          with open(f'data/{ts}.json', 'w') as f:
+              json.dump(data, f, indent=2, ensure_ascii=False)
+
+          print("OKX data fetched successfully")
+          print(json.dumps(data, indent=2, ensure_ascii=False)[:1000])
+          PYEOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "Update OKX data $(date -u '+%Y-%m-%d %H:%M')"
+          git push
